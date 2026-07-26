@@ -1,6 +1,8 @@
 # ============================================================
-# TakemiX Shop Bot v1.4
-# + Проверка целостности EXE (integrity hash)
+# TakemiX Shop Bot v1.5
+# + Integrity Hash check
+# + HWID Reset Count (1 user reset + unlimited admin)
+# + resethashall (mass reset)
 # ============================================================
 
 import telebot
@@ -93,6 +95,13 @@ def read_all_keys():
     rows = sheet.get_all_records()
     result = []
     for i, row in enumerate(rows):
+        # Счётчик сбросов HWID (по умолчанию 0)
+        reset_count_raw = str(row.get("HWID_RESET_COUNT", "0")).strip()
+        try:
+            reset_count = int(reset_count_raw) if reset_count_raw else 0
+        except:
+            reset_count = 0
+
         result.append({
             "KEY": str(row.get("KEY", "")).strip(),
             "HWID": str(row.get("HWID", "")).strip(),
@@ -100,6 +109,7 @@ def read_all_keys():
             "STATUS": str(row.get("STATUS", "")).strip(),
             "CREATED": str(row.get("CREATED", "")).strip(),
             "INTEGRITY_HASH": str(row.get("INTEGRITY_HASH", "")).strip(),
+            "HWID_RESET_COUNT": reset_count,
             "ROW": i + 2
         })
     return result
@@ -114,7 +124,7 @@ def find_key(key_value):
 def add_new_key(key, expires, status="active"):
     sheet = get_sheet()
     created = datetime.now().strftime("%Y-%m-%d")
-    sheet.append_row([key, "", expires, status, created, ""])
+    sheet.append_row([key, "", expires, status, created, "", "0"])
 
 def update_hwid(key, hwid):
     row_data = find_key(key)
@@ -146,6 +156,14 @@ def update_integrity_hash(key, ihash):
         return False
     sheet = get_sheet()
     sheet.update_cell(row_data["ROW"], 6, ihash)
+    return True
+
+def update_reset_count(key, count):
+    row_data = find_key(key)
+    if not row_data:
+        return False
+    sheet = get_sheet()
+    sheet.update_cell(row_data["ROW"], 7, str(count))
     return True
 
 # ============================================================
@@ -208,6 +226,7 @@ def cmd_start(msg):
         "📋 Команды:\n"
         "/buy — Купить ключ\n"
         "/mykey — Инфо о моём ключе\n"
+        "/resetmyhwid — Сбросить HWID (1 раз)\n"
         "/help — Помощь"
     )
     bot.send_message(msg.chat.id, text)
@@ -217,12 +236,15 @@ def cmd_help(msg):
     text = (
         "🆘 Помощь\n\n"
         "1️⃣ Купить ключ:\n"
-        "   Нажми /buy → выбери тариф → оплати → пришли скрин\n\n"
+        "   /buy → выбери тариф → оплати → пришли скрин\n\n"
         "2️⃣ Активация:\n"
         "   Запусти чит → введи ключ прямо в чите\n"
         "   Чит АВТОМАТИЧЕСКИ привяжет HWID!\n\n"
         "3️⃣ Проверка ключа:\n"
         "   /mykey_check КЛЮЧ\n\n"
+        "4️⃣ Сменил ПК?\n"
+        "   /resetmyhwid КЛЮЧ (можно только 1 раз!)\n"
+        "   Дальше — только через @xxTAKEMIxx\n\n"
         "❓ Вопросы: @xxTAKEMIxx"
     )
     bot.send_message(msg.chat.id, text)
@@ -305,6 +327,7 @@ def cmd_mykey_check(msg):
             f"HWID: <code>{row['HWID'] or 'не привязан'}</code>\n"
             f"Срок: {row['EXPIRES']}\n"
             f"Статус: {row['STATUS']}\n"
+            f"Сбросов HWID: {row['HWID_RESET_COUNT']}/1\n"
             f"Создан: {row['CREATED']}"
         )
         bot.send_message(msg.chat.id, text, parse_mode="HTML")
@@ -320,7 +343,82 @@ def cmd_support(msg):
     bot.send_message(msg.chat.id, "🆘 Пиши: @xxTAKEMIxx")
 
 # ============================================================
-# АДМИНСКИЕ КОМАНДЫ
+# ЮЗЕРСКАЯ КОМАНДА СБРОСА HWID (1 раз в жизни)
+# ============================================================
+
+@bot.message_handler(commands=["resetmyhwid"])
+def cmd_resetmyhwid(msg):
+    parts = msg.text.split()
+    if len(parts) != 2:
+        bot.send_message(
+            msg.chat.id,
+            "🔄 <b>Сброс HWID</b>\n\n"
+            "Формат: <code>/resetmyhwid КЛЮЧ</code>\n\n"
+            "⚠️ Можно использовать <b>только 1 раз в жизни</b>!\n"
+            "Если сменишь ПК ещё раз — обратись к @xxTAKEMIxx",
+            parse_mode="HTML"
+        )
+        return
+
+    key = parts[1].strip().upper()
+    try:
+        row = find_key(key)
+        if not row:
+            bot.send_message(msg.chat.id, "❌ Ключ не найден.")
+            return
+
+        if row["STATUS"].lower() == "banned":
+            bot.send_message(msg.chat.id, "🚫 Этот ключ забанен.")
+            return
+
+        # Проверка счётчика
+        reset_count = row["HWID_RESET_COUNT"]
+        if reset_count >= 1:
+            bot.send_message(
+                msg.chat.id,
+                f"❌ <b>Лимит сбросов исчерпан!</b>\n\n"
+                f"Ты уже использовал сброс HWID для этого ключа.\n"
+                f"Обратись к @xxTAKEMIxx для дополнительного сброса.",
+                parse_mode="HTML"
+            )
+            return
+
+        # Проверка что HWID вообще был привязан
+        if not row["HWID"]:
+            bot.send_message(msg.chat.id, "ℹ️ HWID ещё не привязан — сбрасывать нечего.")
+            return
+
+        # Сброс HWID + увеличение счётчика
+        update_hwid(key, "")
+        update_reset_count(key, reset_count + 1)
+
+        bot.send_message(
+            msg.chat.id,
+            f"✅ <b>HWID сброшен!</b>\n\n"
+            f"Ключ: <code>{key}</code>\n"
+            f"Сбросов использовано: <b>1/1</b>\n\n"
+            f"Теперь можешь запустить чит на новом ПК.\n"
+            f"⚠️ Больше сбросить самому не получится!",
+            parse_mode="HTML"
+        )
+
+        # Уведомление админу
+        try:
+            bot.send_message(
+                ADMIN_ID,
+                f"🔄 ЮЗЕР СБРОСИЛ HWID\n\n"
+                f"От: @{msg.from_user.username or 'no_username'} (ID: {msg.from_user.id})\n"
+                f"Ключ: <code>{key}</code>\n"
+                f"Старый HWID: <code>{row['HWID']}</code>\n"
+                f"Сбросов: 1/1",
+                parse_mode="HTML"
+            )
+        except:
+            pass
+
+    except Exception as e:
+        bot.send_message(msg.chat.id, f"⚠️ Ошибка: {e}")# ============================================================
+# АДМИНСКИЕ КОМАНДЫ (ключи)
 # ============================================================
 
 @bot.message_handler(commands=["genkey"])
@@ -395,7 +493,9 @@ def cmd_approve(msg):
             f"1. Перейди по ссылке → вступи в канал\n"
             f"2. Скачай <b>TakemiX.exe</b>\n"
             f"3. Запусти чит → введи ключ\n"
-            f"4. HWID привяжется автоматически ✅"
+            f"4. HWID привяжется автоматически ✅\n\n"
+            f"ℹ️ Если сменишь ПК — можешь сбросить HWID <b>1 раз</b>\n"
+            f"командой /resetmyhwid"
         )
 
         bot.send_message(target_id, message_text, parse_mode="HTML", disable_web_page_preview=True)
@@ -455,17 +555,50 @@ def cmd_unban(msg):
     if update_status(key, "active"):
         bot.send_message(msg.chat.id, f"✅ {key} разбанен")
 
+# АДМИНСКИЙ СБРОС HWID (без ограничений, счётчик НЕ сбрасывается)
 @bot.message_handler(commands=["resethwid"])
 def cmd_resethwid(msg):
     if not is_admin(msg.from_user.id):
         return
     parts = msg.text.split()
     if len(parts) != 2:
+        bot.send_message(msg.chat.id, "Формат: /resethwid КЛЮЧ")
         return
     key = parts[1].strip().upper()
     if update_hwid(key, ""):
-        bot.send_message(msg.chat.id, f"✅ HWID сброшен для {key}")
+        bot.send_message(msg.chat.id, f"✅ HWID сброшен для {key}\n(счётчик юзера НЕ сброшен)")
+    else:
+        bot.send_message(msg.chat.id, "❌ Не найден")
 
+# АДМИНСКИЙ СБРОС HWID + ОБНУЛЕНИЕ СЧЁТЧИКА
+@bot.message_handler(commands=["resethwidforce"])
+def cmd_resethwidforce(msg):
+    if not is_admin(msg.from_user.id):
+        return
+    parts = msg.text.split()
+    if len(parts) != 2:
+        bot.send_message(
+            msg.chat.id,
+            "Формат: /resethwidforce КЛЮЧ\n\n"
+            "Сбросит HWID И обнулит счётчик юзера.\n"
+            "Юзер снова сможет использовать /resetmyhwid."
+        )
+        return
+    key = parts[1].strip().upper()
+    try:
+        if update_hwid(key, "") and update_reset_count(key, 0):
+            bot.send_message(
+                msg.chat.id,
+                f"✅ HWID сброшен для {key}\n"
+                f"✅ Счётчик обнулён (0/1)\n\n"
+                f"Юзер снова может использовать /resetmyhwid"
+            )
+        else:
+            bot.send_message(msg.chat.id, "❌ Не найден")
+    except Exception as e:
+        bot.send_message(msg.chat.id, f"⚠️ {e}")
+
+# СБРОС INTEGRITY HASH (одному ключу)
 @bot.message_handler(commands=["resethash"])
 def cmd_resethash(msg):
     if not is_admin(msg.from_user.id):
@@ -480,6 +613,49 @@ def cmd_resethash(msg):
     else:
         bot.send_message(msg.chat.id, "❌ Ключ не найден")
 
+# СБРОС INTEGRITY HASH ВСЕМ (для обновления версии чита)
+@bot.message_handler(commands=["resethashall"])
+def cmd_resethashall(msg):
+    if not is_admin(msg.from_user.id):
+        return
+
+    parts = msg.text.split()
+    if len(parts) != 2 or parts[1].lower() != "confirm":
+        bot.send_message(
+            msg.chat.id,
+            "⚠️ <b>Сбросить хеш ВСЕМ ключам?</b>\n\n"
+            "Это нужно при выпуске новой версии чита.\n"
+            "Все юзеры получат новый эталонный хеш при следующем запуске.\n\n"
+            "Для подтверждения напиши:\n"
+            "<code>/resethashall confirm</code>",
+            parse_mode="HTML"
+        )
+        return
+
+    try:
+        all_keys = read_all_keys()
+        count = 0
+        errors = 0
+
+        for k in all_keys:
+            if k["INTEGRITY_HASH"]:
+                try:
+                    update_integrity_hash(k["KEY"], "")
+                    count += 1
+                except:
+                    errors += 1
+
+        bot.send_message(
+            msg.chat.id,
+            f"✅ <b>Готово!</b>\n\n"
+            f"Сброшено: <b>{count}</b> ключей\n"
+            f"Ошибок: {errors}\n\n"
+            f"Все юзеры получат новый эталонный хеш при следующем запуске чита.",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        bot.send_message(msg.chat.id, f"⚠️ Ошибка: {e}")
+
 @bot.message_handler(commands=["stats"])
 def cmd_stats(msg):
     if not is_admin(msg.from_user.id):
@@ -491,6 +667,7 @@ def cmd_stats(msg):
         banned = sum(1 for k in all_keys if k["STATUS"].lower() == "banned")
         with_hwid = sum(1 for k in all_keys if k["HWID"])
         with_hash = sum(1 for k in all_keys if k["INTEGRITY_HASH"])
+        used_reset = sum(1 for k in all_keys if k["HWID_RESET_COUNT"] >= 1)
         ks = "🔴 ВКЛ" if settings.get("killswitch", False) else "🟢 ВЫКЛ"
         bot.send_message(
             msg.chat.id,
@@ -500,6 +677,7 @@ def cmd_stats(msg):
             f"Забаненных: {banned}\n"
             f"С HWID: {with_hwid}\n"
             f"С Hash: {with_hash}\n"
+            f"Использовали сброс: {used_reset}\n"
             f"Ждут оплаты: {len(pending_payments)}\n\n"
             f"🔴 KillSwitch: {ks}"
         )
@@ -517,8 +695,9 @@ def cmd_list(msg):
             icon = "✅" if k["STATUS"].lower() == "active" else "🚫"
             hwid_display = k["HWID"][:20] if k["HWID"] else "не привязан"
             hash_display = "✓" if k["INTEGRITY_HASH"] else "✗"
+            reset_display = f"{k['HWID_RESET_COUNT']}/1"
             text += f"{icon} <code>{k['KEY']}</code>\n"
-            text += f"   HWID: {hwid_display} | Hash: {hash_display}\n"
+            text += f"   HWID: {hwid_display} | Hash: {hash_display} | Reset: {reset_display}\n"
             text += f"   Срок: {k['EXPIRES']}\n\n"
         bot.send_message(msg.chat.id, text, parse_mode="HTML")
     except Exception as e:
@@ -624,11 +803,15 @@ def cmd_adminhelp(msg):
     text = (
         "👑 Админские команды:\n\n"
         "🔑 Ключи:\n"
-        "/genkey 7|30|forever\n"
-        "/ban КЛЮЧ\n"
-        "/unban КЛЮЧ\n"
-        "/resethwid КЛЮЧ\n"
-        "/resethash КЛЮЧ — сброс проверки целостности\n\n"
+        "/genkey 7|30|forever — создать\n"
+        "/ban КЛЮЧ — забанить\n"
+        "/unban КЛЮЧ — разбанить\n\n"
+        "🔄 HWID:\n"
+        "/resethwid КЛЮЧ — сброс HWID (счётчик НЕ трогает)\n"
+        "/resethwidforce КЛЮЧ — сброс HWID + обнулить счётчик\n\n"
+        "🔐 Integrity Hash:\n"
+        "/resethash КЛЮЧ — сброс для одного\n"
+        "/resethashall confirm — сброс ВСЕМ (при обновлении чита)\n\n"
         "💰 Заказы:\n"
         "/approve USER_ID\n"
         "/reject USER_ID\n\n"
@@ -739,7 +922,6 @@ def api_check():
         # ПРОВЕРКА ЦЕЛОСТНОСТИ
         stored_hash = row["INTEGRITY_HASH"]
         if stored_hash and ihash and stored_hash != ihash:
-            # Хеш не совпадает — .exe был изменён!
             try:
                 bot.send_message(ADMIN_ID, f"⚠️ INTEGRITY FAIL\nКлюч: <code>{key}</code>\nOжидался: <code>{stored_hash[:16]}...</code>\nПришёл: <code>{ihash[:16]}...</code>", parse_mode="HTML")
             except:
@@ -767,7 +949,7 @@ def run_flask():
 
 if __name__ == "__main__":
     print("=" * 50)
-    print("TakemiX Shop Bot v1.4")
+    print("TakemiX Shop Bot v1.5")
     print("=" * 50)
     print(f"Bot Token: {BOT_TOKEN[:20]}...")
     print(f"Admin ID: {ADMIN_ID}")
