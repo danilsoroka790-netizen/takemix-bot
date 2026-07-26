@@ -1,5 +1,7 @@
 # ============================================================
-# TakemiX Shop Bot v1.1 (с Flask API для автоматического HWID)
+# TakemiX Shop Bot v1.2
+# + Killswitch (глобальное выключение чита)
+# + Гибкие реквизиты (/setname /setcard /setbank)
 # ============================================================
 
 import telebot
@@ -19,15 +21,12 @@ import time
 # КОНФИГ
 # ============================================================
 
-# Токен и ID берутся из переменных окружения (для Railway) 
-# или из значений по умолчанию (для локального запуска)
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8881951544:AAGUUpJeJXcv6kE__YecGUTTuwRs8frMgB8")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "8607868320"))
 SHEET_ID = os.environ.get("SHEET_ID", "1VJt5zaXjfz_XF6TWVeBpn-oZGq7qhY41jKaDkSbe_LI")
 CREDENTIALS_FILE = "credentials.json"
 SETTINGS_FILE = "settings.json"
 
-# Секретный ключ для API (должен совпадать в C++ софте!)
 API_SECRET = os.environ.get("API_SECRET", "TakemiX_S3cr3t_2026_ChangeMe")
 API_PORT = int(os.environ.get("PORT", 5000))
 
@@ -37,13 +36,13 @@ API_PORT = int(os.environ.get("PORT", 5000))
 
 DEFAULT_SETTINGS = {
     "prices": {"7": 300, "30": 500, "forever": 800},
-    "payment_info": (
-        "💳 Реквизиты для оплаты:\n\n"
-        "Карта Сбербанк: 1234 5678 9012 3456\n"
-        "Получатель: Иван И.\n\n"
-        "После оплаты пришли скрин чека сюда 📸"
-    ),
-    "welcome_text": ""
+    "payment": {
+        "bank": "Сбербанк",
+        "card": "1234 5678 9012 3456",
+        "name": "Иван И.",
+        "extra": "После оплаты пришли скрин чека сюда 📸"
+    },
+    "killswitch": False
 }
 
 def load_settings():
@@ -64,6 +63,17 @@ def save_settings(s):
         json.dump(s, f, ensure_ascii=False, indent=2)
 
 settings = load_settings()
+
+def build_payment_info():
+    """Собирает текст реквизитов из настроек"""
+    p = settings.get("payment", DEFAULT_SETTINGS["payment"])
+    return (
+        f"💳 Реквизиты для оплаты:\n\n"
+        f"Банк: {p['bank']}\n"
+        f"Карта: {p['card']}\n"
+        f"Получатель: {p['name']}\n\n"
+        f"{p['extra']}"
+    )
 
 # ============================================================
 # GOOGLE SHEETS
@@ -216,7 +226,7 @@ def callback_buy(call):
 
     text = (
         f"✅ Ты выбрал: {tariff_name} ({price}₽)\n\n"
-        f"{settings['payment_info']}\n\n"
+        f"{build_payment_info()}\n\n"
         "После оплаты пришли сюда 📸 скрин чека."
     )
     bot.send_message(call.message.chat.id, text)
@@ -288,7 +298,7 @@ def cmd_support(msg):
     bot.send_message(msg.chat.id, "🆘 Пиши: @xxTAKEMIxx")
 
 # ============================================================
-# АДМИНСКИЕ КОМАНДЫ
+# АДМИНСКИЕ КОМАНДЫ (ключи)
 # ============================================================
 
 @bot.message_handler(commands=["genkey"])
@@ -427,7 +437,17 @@ def cmd_stats(msg):
         active = sum(1 for k in all_keys if k["STATUS"].lower() == "active")
         banned = sum(1 for k in all_keys if k["STATUS"].lower() == "banned")
         with_hwid = sum(1 for k in all_keys if k["HWID"])
-        bot.send_message(msg.chat.id, f"📊 Статистика:\n\nВсего: {total}\nАктивных: {active}\nЗабаненных: {banned}\nС HWID: {with_hwid}\nЖдут оплаты: {len(pending_payments)}")
+        ks = "🔴 ВКЛ" if settings.get("killswitch", False) else "🟢 ВЫКЛ"
+        bot.send_message(
+            msg.chat.id,
+            f"📊 Статистика:\n\n"
+            f"Всего: {total}\n"
+            f"Активных: {active}\n"
+            f"Забаненных: {banned}\n"
+            f"С HWID: {with_hwid}\n"
+            f"Ждут оплаты: {len(pending_payments)}\n\n"
+            f"🔴 KillSwitch: {ks}"
+        )
     except Exception as e:
         bot.send_message(msg.chat.id, f"⚠️ {e}")
 
@@ -463,16 +483,91 @@ def cmd_setprice(msg):
     save_settings(settings)
     bot.send_message(msg.chat.id, f"✅ {tariff} = {price}₽")
 
-@bot.message_handler(commands=["setpay"])
-def cmd_setpay(msg):
+# ============================================================
+# УПРАВЛЕНИЕ РЕКВИЗИТАМИ (только админ)
+# ============================================================
+
+@bot.message_handler(commands=["setname"])
+def cmd_setname(msg):
     if not is_admin(msg.from_user.id):
         return
-    new_text = msg.text.replace("/setpay", "", 1).strip()
-    if not new_text:
+    new_name = msg.text.replace("/setname", "", 1).strip()
+    if not new_name:
+        bot.send_message(msg.chat.id, "Формат: /setname Имя Фамилия")
         return
-    settings["payment_info"] = new_text
+    if "payment" not in settings:
+        settings["payment"] = DEFAULT_SETTINGS["payment"].copy()
+    settings["payment"]["name"] = new_name
     save_settings(settings)
-    bot.send_message(msg.chat.id, f"✅ Реквизиты:\n\n{new_text}")
+    bot.send_message(msg.chat.id, f"✅ Получатель изменён:\n{new_name}")
+
+@bot.message_handler(commands=["setcard"])
+def cmd_setcard(msg):
+    if not is_admin(msg.from_user.id):
+        return
+    new_card = msg.text.replace("/setcard", "", 1).strip()
+    if not new_card:
+        bot.send_message(msg.chat.id, "Формат: /setcard 1234 5678 9012 3456")
+        return
+    if "payment" not in settings:
+        settings["payment"] = DEFAULT_SETTINGS["payment"].copy()
+    settings["payment"]["card"] = new_card
+    save_settings(settings)
+    bot.send_message(msg.chat.id, f"✅ Карта изменена:\n{new_card}")
+
+@bot.message_handler(commands=["setbank"])
+def cmd_setbank(msg):
+    if not is_admin(msg.from_user.id):
+        return
+    new_bank = msg.text.replace("/setbank", "", 1).strip()
+    if not new_bank:
+        bot.send_message(msg.chat.id, "Формат: /setbank Сбербанк")
+        return
+    if "payment" not in settings:
+        settings["payment"] = DEFAULT_SETTINGS["payment"].copy()
+    settings["payment"]["bank"] = new_bank
+    save_settings(settings)
+    bot.send_message(msg.chat.id, f"✅ Банк изменён:\n{new_bank}")
+
+@bot.message_handler(commands=["showpay"])
+def cmd_showpay(msg):
+    if not is_admin(msg.from_user.id):
+        return
+    bot.send_message(msg.chat.id, f"Текущие реквизиты:\n\n{build_payment_info()}")
+
+# ============================================================
+# KILL SWITCH (глобальное выключение чита)
+# ============================================================
+
+@bot.message_handler(commands=["killswitch"])
+def cmd_killswitch(msg):
+    if not is_admin(msg.from_user.id):
+        return
+    parts = msg.text.split()
+    
+    if len(parts) == 1:
+        status = settings.get("killswitch", False)
+        status_text = "🔴 ВКЛЮЧЕН (чит выключен у всех)" if status else "🟢 ВЫКЛЮЧЕН (чит работает)"
+        bot.send_message(
+            msg.chat.id,
+            f"KillSwitch статус: {status_text}\n\n"
+            f"Команды:\n"
+            f"/killswitch on — выключить чит у ВСЕХ\n"
+            f"/killswitch off — включить обратно"
+        )
+        return
+    
+    action = parts[1].lower()
+    if action == "on":
+        settings["killswitch"] = True
+        save_settings(settings)
+        bot.send_message(msg.chat.id, "🔴 KILLSWITCH ВКЛЮЧЁН!\n\nЧит выключится у всех при следующем heartbeat (~5 мин).")
+    elif action == "off":
+        settings["killswitch"] = False
+        save_settings(settings)
+        bot.send_message(msg.chat.id, "🟢 KillSwitch выключен.\n\nЧит снова доступен для юзеров.")
+    else:
+        bot.send_message(msg.chat.id, "❌ Формат: /killswitch on|off")
 
 @bot.message_handler(commands=["adminhelp"])
 def cmd_adminhelp(msg):
@@ -480,21 +575,33 @@ def cmd_adminhelp(msg):
         return
     text = (
         "👑 Админские команды:\n\n"
+        "🔑 Ключи:\n"
         "/genkey 7|30|forever — создать ключ\n"
-        "/approve USER_ID — подтвердить оплату\n"
-        "/reject USER_ID — отклонить\n"
         "/ban КЛЮЧ — забанить\n"
         "/unban КЛЮЧ — разбанить\n"
-        "/resethwid КЛЮЧ — сбросить HWID\n"
-        "/setprice 7 350 — изменить цену\n"
-        "/setpay ТЕКСТ — изменить реквизиты\n"
+        "/resethwid КЛЮЧ — сбросить HWID\n\n"
+        "💰 Заказы:\n"
+        "/approve USER_ID — подтвердить оплату\n"
+        "/reject USER_ID — отклонить\n\n"
+        "💳 Реквизиты:\n"
+        "/setname Иван И. — сменить получателя\n"
+        "/setcard 1234 5678... — сменить карту\n"
+        "/setbank Сбербанк — сменить банк\n"
+        "/showpay — показать реквизиты\n\n"
+        "⚙️ Цены:\n"
+        "/setprice 7 350 — изменить цену\n\n"
+        "🔴 БЕЗОПАСНОСТЬ:\n"
+        "/killswitch — статус\n"
+        "/killswitch on — ВЫКЛЮЧИТЬ чит у ВСЕХ\n"
+        "/killswitch off — включить обратно\n\n"
+        "📊 Инфо:\n"
         "/stats — статистика\n"
         "/list — список ключей"
     )
     bot.send_message(msg.chat.id, text)
 
 # ============================================================
-# HTTP API ДЛЯ ЧИТА (автоматический HWID)
+# HTTP API ДЛЯ ЧИТА
 # ============================================================
 
 app = Flask(__name__)
@@ -510,6 +617,11 @@ def api_root():
 def api_activate():
     if not check_auth(request):
         return jsonify({"status": "error", "message": "unauthorized"}), 403
+    
+    # KILLSWITCH
+    if settings.get("killswitch", False):
+        return jsonify({"status": "error", "message": "killswitch"}), 403
+    
     try:
         data = request.get_json()
         key = str(data.get("key", "")).strip().upper()
@@ -551,6 +663,11 @@ def api_activate():
 def api_check():
     if not check_auth(request):
         return jsonify({"status": "error", "message": "unauthorized"}), 403
+    
+    # KILLSWITCH
+    if settings.get("killswitch", False):
+        return jsonify({"status": "error", "message": "killswitch"}), 403
+    
     try:
         data = request.get_json()
         key = str(data.get("key", "")).strip().upper()
@@ -585,7 +702,7 @@ def run_flask():
 
 if __name__ == "__main__":
     print("=" * 50)
-    print("TakemiX Shop Bot v1.1")
+    print("TakemiX Shop Bot v1.2")
     print("=" * 50)
     print(f"Bot Token: {BOT_TOKEN[:20]}...")
     print(f"Admin ID: {ADMIN_ID}")
@@ -608,8 +725,6 @@ if __name__ == "__main__":
     api_thread.start()
     time.sleep(1)
     print(f"✅ API работает на порту {API_PORT}")
-    print(f"   POST /api/activate")
-    print(f"   POST /api/check")
     print()
     print("✅ Бот запущен! Пиши в Telegram.")
     print("Ctrl+C для остановки")
