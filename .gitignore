@@ -1,0 +1,5 @@
+credentials.json
+settings.json
+__pycache__/
+*.pyc
+bot_old.py
