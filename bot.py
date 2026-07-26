@@ -1,7 +1,9 @@
 # ============================================================
-# TakemiX Shop Bot v1.2
-# + Killswitch (глобальное выключение чита)
-# + Гибкие реквизиты (/setname /setcard /setbank)
+# TakemiX Shop Bot v1.3
+# + Одноразовые ссылки на приватный канал
+# + Killswitch
+# + Гибкие реквизиты
+# + HTTP API для авто-HWID
 # ============================================================
 
 import telebot
@@ -29,6 +31,9 @@ SETTINGS_FILE = "settings.json"
 
 API_SECRET = os.environ.get("API_SECRET", "TakemiX_S3cr3t_2026_ChangeMe")
 API_PORT = int(os.environ.get("PORT", 5000))
+
+# ID приватного канала с файлами
+CHANNEL_ID = int(os.environ.get("CHANNEL_ID", "-1003916624439"))
 
 # ============================================================
 # НАСТРОЙКИ
@@ -65,7 +70,6 @@ def save_settings(s):
 settings = load_settings()
 
 def build_payment_info():
-    """Собирает текст реквизитов из настроек"""
     p = settings.get("payment", DEFAULT_SETTINGS["payment"])
     return (
         f"💳 Реквизиты для оплаты:\n\n"
@@ -168,6 +172,30 @@ pending_payments = {}
 
 def is_admin(user_id):
     return int(user_id) == ADMIN_ID
+
+# ============================================================
+# ОДНОРАЗОВЫЕ ССЫЛКИ НА КАНАЛ
+# ============================================================
+
+def create_one_time_invite():
+    """
+    Создаёт одноразовую пригласительную ссылку.
+    - member_limit=1 → только 1 человек может вступить
+    - expire_date=24h → ссылка сгорает через 24 часа даже если не использована
+    """
+    try:
+        expire_time = int((datetime.now() + timedelta(hours=24)).timestamp())
+
+        invite = bot.create_chat_invite_link(
+            chat_id=CHANNEL_ID,
+            member_limit=1,
+            expire_date=expire_time,
+            name=f"Auto-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+        )
+        return invite.invite_link
+    except Exception as e:
+        print(f"[ERROR] create_one_time_invite: {e}")
+        return None
 
 # ============================================================
 # ЮЗЕРСКИЕ КОМАНДЫ
@@ -349,20 +377,44 @@ def cmd_approve(msg):
     tariff_names = {"7": "7 дней", "30": "30 дней", "forever": "Навсегда"}
     tariff_name = tariff_names.get(tariff, tariff)
 
+    # Одноразовая ссылка на канал
+    invite_link = create_one_time_invite()
+
     try:
-        bot.send_message(
-            target_id,
+        message_text = (
             f"🎉 Оплата подтверждена!\n\n"
-            f"Твой ключ: <code>{key}</code>\n"
-            f"Тариф: <b>{tariff_name}</b>\n"
-            f"Срок: {expires}\n\n"
+            f"🔑 Твой ключ: <code>{key}</code>\n"
+            f"📅 Тариф: <b>{tariff_name}</b>\n"
+            f"⏰ Срок: {expires}\n\n"
+        )
+
+        if invite_link:
+            message_text += (
+                f"📥 Скачай программу тут:\n"
+                f"{invite_link}\n\n"
+                f"⚠️ <b>Ссылка одноразовая</b> — работает только для тебя!\n"
+                f"⏱ Действует 24 часа.\n\n"
+            )
+        else:
+            message_text += "⚠️ Ссылка на канал не создалась. Напиши @xxTAKEMIxx\n\n"
+
+        message_text += (
             f"📝 Как использовать:\n"
-            f"1. Запусти <b>TakemiX.exe</b>\n"
-            f"2. Введи этот ключ\n"
-            f"3. HWID привяжется автоматически ✅",
+            f"1. Перейди по ссылке → вступи в канал\n"
+            f"2. Скачай <b>TakemiX.exe</b>\n"
+            f"3. Запусти чит → введи ключ\n"
+            f"4. HWID привяжется автоматически ✅"
+        )
+
+        bot.send_message(target_id, message_text, parse_mode="HTML", disable_web_page_preview=True)
+
+        bot.send_message(
+            msg.chat.id,
+            f"✅ Ключ + ссылка отправлены юзеру {target_id}\n\n"
+            f"Ключ: <code>{key}</code>\n"
+            f"Ссылка: {invite_link or 'не создалась'}",
             parse_mode="HTML"
         )
-        bot.send_message(msg.chat.id, f"✅ Ключ отправлен юзеру {target_id}")
     except Exception as e:
         bot.send_message(msg.chat.id, f"⚠️ Не отправлено: {e}\nКлюч: {key}")
 
@@ -460,7 +512,10 @@ def cmd_list(msg):
         text = "🔑 Ключи:\n\n"
         for k in all_keys[-20:]:
             icon = "✅" if k["STATUS"].lower() == "active" else "🚫"
-            text += f"{icon} <code>{k['KEY']}</code>\nСрок: {k['EXPIRES']}\n\n"
+            hwid_display = k["HWID"] if k["HWID"] else "не привязан"
+            text += f"{icon} <code>{k['KEY']}</code>\n"
+            text += f"   HWID: <code>{hwid_display}</code>\n"
+            text += f"   Срок: {k['EXPIRES']}\n\n"
         bot.send_message(msg.chat.id, text, parse_mode="HTML")
     except Exception as e:
         bot.send_message(msg.chat.id, f"⚠️ {e}")
@@ -484,7 +539,7 @@ def cmd_setprice(msg):
     bot.send_message(msg.chat.id, f"✅ {tariff} = {price}₽")
 
 # ============================================================
-# УПРАВЛЕНИЕ РЕКВИЗИТАМИ (только админ)
+# УПРАВЛЕНИЕ РЕКВИЗИТАМИ
 # ============================================================
 
 @bot.message_handler(commands=["setname"])
@@ -536,7 +591,7 @@ def cmd_showpay(msg):
     bot.send_message(msg.chat.id, f"Текущие реквизиты:\n\n{build_payment_info()}")
 
 # ============================================================
-# KILL SWITCH (глобальное выключение чита)
+# KILL SWITCH
 # ============================================================
 
 @bot.message_handler(commands=["killswitch"])
@@ -544,7 +599,7 @@ def cmd_killswitch(msg):
     if not is_admin(msg.from_user.id):
         return
     parts = msg.text.split()
-    
+
     if len(parts) == 1:
         status = settings.get("killswitch", False)
         status_text = "🔴 ВКЛЮЧЕН (чит выключен у всех)" if status else "🟢 ВЫКЛЮЧЕН (чит работает)"
@@ -556,7 +611,7 @@ def cmd_killswitch(msg):
             f"/killswitch off — включить обратно"
         )
         return
-    
+
     action = parts[1].lower()
     if action == "on":
         settings["killswitch"] = True
@@ -568,6 +623,33 @@ def cmd_killswitch(msg):
         bot.send_message(msg.chat.id, "🟢 KillSwitch выключен.\n\nЧит снова доступен для юзеров.")
     else:
         bot.send_message(msg.chat.id, "❌ Формат: /killswitch on|off")
+
+# ============================================================
+# ТЕСТОВЫЕ КОМАНДЫ
+# ============================================================
+
+@bot.message_handler(commands=["testlink"])
+def cmd_testlink(msg):
+    if not is_admin(msg.from_user.id):
+        return
+    link = create_one_time_invite()
+    if link:
+        bot.send_message(
+            msg.chat.id,
+            f"✅ Тестовая ссылка создана:\n{link}\n\n"
+            f"⚠️ Одноразовая, для 1 человека, работает 24 часа",
+            disable_web_page_preview=True
+        )
+    else:
+        bot.send_message(
+            msg.chat.id,
+            "❌ Не удалось создать ссылку!\n\n"
+            "Проверь:\n"
+            "1. Бот добавлен в канал?\n"
+            "2. Бот назначен админом?\n"
+            "3. У бота есть право 'Приглашать пользователей'?\n"
+            "4. CHANNEL_ID правильный?"
+        )
 
 @bot.message_handler(commands=["adminhelp"])
 def cmd_adminhelp(msg):
@@ -581,7 +663,7 @@ def cmd_adminhelp(msg):
         "/unban КЛЮЧ — разбанить\n"
         "/resethwid КЛЮЧ — сбросить HWID\n\n"
         "💰 Заказы:\n"
-        "/approve USER_ID — подтвердить оплату\n"
+        "/approve USER_ID — подтвердить оплату (+ ссылка)\n"
         "/reject USER_ID — отклонить\n\n"
         "💳 Реквизиты:\n"
         "/setname Иван И. — сменить получателя\n"
@@ -594,6 +676,8 @@ def cmd_adminhelp(msg):
         "/killswitch — статус\n"
         "/killswitch on — ВЫКЛЮЧИТЬ чит у ВСЕХ\n"
         "/killswitch off — включить обратно\n\n"
+        "📥 Канал:\n"
+        "/testlink — тестовая одноразовая ссылка\n\n"
         "📊 Инфо:\n"
         "/stats — статистика\n"
         "/list — список ключей"
@@ -617,11 +701,10 @@ def api_root():
 def api_activate():
     if not check_auth(request):
         return jsonify({"status": "error", "message": "unauthorized"}), 403
-    
-    # KILLSWITCH
+
     if settings.get("killswitch", False):
         return jsonify({"status": "error", "message": "killswitch"}), 403
-    
+
     try:
         data = request.get_json()
         key = str(data.get("key", "")).strip().upper()
@@ -663,11 +746,10 @@ def api_activate():
 def api_check():
     if not check_auth(request):
         return jsonify({"status": "error", "message": "unauthorized"}), 403
-    
-    # KILLSWITCH
+
     if settings.get("killswitch", False):
         return jsonify({"status": "error", "message": "killswitch"}), 403
-    
+
     try:
         data = request.get_json()
         key = str(data.get("key", "")).strip().upper()
@@ -702,11 +784,12 @@ def run_flask():
 
 if __name__ == "__main__":
     print("=" * 50)
-    print("TakemiX Shop Bot v1.2")
+    print("TakemiX Shop Bot v1.3")
     print("=" * 50)
     print(f"Bot Token: {BOT_TOKEN[:20]}...")
     print(f"Admin ID: {ADMIN_ID}")
     print(f"Sheet ID: {SHEET_ID}")
+    print(f"Channel ID: {CHANNEL_ID}")
     print(f"API Port: {API_PORT}")
     print()
 
