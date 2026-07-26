@@ -1,9 +1,6 @@
 # ============================================================
-# TakemiX Shop Bot v1.3
-# + Одноразовые ссылки на приватный канал
-# + Killswitch
-# + Гибкие реквизиты
-# + HTTP API для авто-HWID
+# TakemiX Shop Bot v1.4
+# + Проверка целостности EXE (integrity hash)
 # ============================================================
 
 import telebot
@@ -31,8 +28,6 @@ SETTINGS_FILE = "settings.json"
 
 API_SECRET = os.environ.get("API_SECRET", "TakemiX_S3cr3t_2026_ChangeMe")
 API_PORT = int(os.environ.get("PORT", 5000))
-
-# ID приватного канала с файлами
 CHANNEL_ID = int(os.environ.get("CHANNEL_ID", "-1003916624439"))
 
 # ============================================================
@@ -104,6 +99,7 @@ def read_all_keys():
             "EXPIRES": str(row.get("EXPIRES", "")).strip(),
             "STATUS": str(row.get("STATUS", "")).strip(),
             "CREATED": str(row.get("CREATED", "")).strip(),
+            "INTEGRITY_HASH": str(row.get("INTEGRITY_HASH", "")).strip(),
             "ROW": i + 2
         })
     return result
@@ -118,7 +114,7 @@ def find_key(key_value):
 def add_new_key(key, expires, status="active"):
     sheet = get_sheet()
     created = datetime.now().strftime("%Y-%m-%d")
-    sheet.append_row([key, "", expires, status, created])
+    sheet.append_row([key, "", expires, status, created, ""])
 
 def update_hwid(key, hwid):
     row_data = find_key(key)
@@ -142,6 +138,14 @@ def update_expires(key, new_expires):
         return False
     sheet = get_sheet()
     sheet.update_cell(row_data["ROW"], 3, new_expires)
+    return True
+
+def update_integrity_hash(key, ihash):
+    row_data = find_key(key)
+    if not row_data:
+        return False
+    sheet = get_sheet()
+    sheet.update_cell(row_data["ROW"], 6, ihash)
     return True
 
 # ============================================================
@@ -173,19 +177,9 @@ pending_payments = {}
 def is_admin(user_id):
     return int(user_id) == ADMIN_ID
 
-# ============================================================
-# ОДНОРАЗОВЫЕ ССЫЛКИ НА КАНАЛ
-# ============================================================
-
 def create_one_time_invite():
-    """
-    Создаёт одноразовую пригласительную ссылку.
-    - member_limit=1 → только 1 человек может вступить
-    - expire_date=24h → ссылка сгорает через 24 часа даже если не использована
-    """
     try:
         expire_time = int((datetime.now() + timedelta(hours=24)).timestamp())
-
         invite = bot.create_chat_invite_link(
             chat_id=CHANNEL_ID,
             member_limit=1,
@@ -326,7 +320,7 @@ def cmd_support(msg):
     bot.send_message(msg.chat.id, "🆘 Пиши: @xxTAKEMIxx")
 
 # ============================================================
-# АДМИНСКИЕ КОМАНДЫ (ключи)
+# АДМИНСКИЕ КОМАНДЫ
 # ============================================================
 
 @bot.message_handler(commands=["genkey"])
@@ -335,7 +329,7 @@ def cmd_genkey(msg):
         return
     parts = msg.text.split()
     if len(parts) != 2:
-        bot.send_message(msg.chat.id, "Формат: /genkey <срок>\nПримеры: /genkey 7, /genkey forever")
+        bot.send_message(msg.chat.id, "Формат: /genkey <срок>")
         return
     days = parts[1].strip().lower()
     key = generate_key()
@@ -377,7 +371,6 @@ def cmd_approve(msg):
     tariff_names = {"7": "7 дней", "30": "30 дней", "forever": "Навсегда"}
     tariff_name = tariff_names.get(tariff, tariff)
 
-    # Одноразовая ссылка на канал
     invite_link = create_one_time_invite()
 
     try:
@@ -390,8 +383,7 @@ def cmd_approve(msg):
 
         if invite_link:
             message_text += (
-                f"📥 Скачай программу тут:\n"
-                f"{invite_link}\n\n"
+                f"📥 Скачай программу тут:\n{invite_link}\n\n"
                 f"⚠️ <b>Ссылка одноразовая</b> — работает только для тебя!\n"
                 f"⏱ Действует 24 часа.\n\n"
             )
@@ -426,7 +418,6 @@ def cmd_reject(msg):
         return
     parts = msg.text.split()
     if len(parts) != 2:
-        bot.send_message(msg.chat.id, "Формат: /reject <user_id>")
         return
     try:
         target_id = int(parts[1])
@@ -446,16 +437,12 @@ def cmd_ban(msg):
         return
     parts = msg.text.split()
     if len(parts) != 2:
-        bot.send_message(msg.chat.id, "Формат: /ban КЛЮЧ")
         return
     key = parts[1].strip().upper()
-    try:
-        if update_status(key, "banned"):
-            bot.send_message(msg.chat.id, f"✅ {key} забанен")
-        else:
-            bot.send_message(msg.chat.id, "❌ Не найден")
-    except Exception as e:
-        bot.send_message(msg.chat.id, f"⚠️ {e}")
+    if update_status(key, "banned"):
+        bot.send_message(msg.chat.id, f"✅ {key} забанен")
+    else:
+        bot.send_message(msg.chat.id, "❌ Не найден")
 
 @bot.message_handler(commands=["unban"])
 def cmd_unban(msg):
@@ -479,6 +466,20 @@ def cmd_resethwid(msg):
     if update_hwid(key, ""):
         bot.send_message(msg.chat.id, f"✅ HWID сброшен для {key}")
 
+@bot.message_handler(commands=["resethash"])
+def cmd_resethash(msg):
+    if not is_admin(msg.from_user.id):
+        return
+    parts = msg.text.split()
+    if len(parts) != 2:
+        bot.send_message(msg.chat.id, "Формат: /resethash КЛЮЧ")
+        return
+    key = parts[1].strip().upper()
+    if update_integrity_hash(key, ""):
+        bot.send_message(msg.chat.id, f"✅ Integrity hash сброшен для {key}\n(при след. запуске сохранится новый)")
+    else:
+        bot.send_message(msg.chat.id, "❌ Ключ не найден")
+
 @bot.message_handler(commands=["stats"])
 def cmd_stats(msg):
     if not is_admin(msg.from_user.id):
@@ -489,6 +490,7 @@ def cmd_stats(msg):
         active = sum(1 for k in all_keys if k["STATUS"].lower() == "active")
         banned = sum(1 for k in all_keys if k["STATUS"].lower() == "banned")
         with_hwid = sum(1 for k in all_keys if k["HWID"])
+        with_hash = sum(1 for k in all_keys if k["INTEGRITY_HASH"])
         ks = "🔴 ВКЛ" if settings.get("killswitch", False) else "🟢 ВЫКЛ"
         bot.send_message(
             msg.chat.id,
@@ -497,6 +499,7 @@ def cmd_stats(msg):
             f"Активных: {active}\n"
             f"Забаненных: {banned}\n"
             f"С HWID: {with_hwid}\n"
+            f"С Hash: {with_hash}\n"
             f"Ждут оплаты: {len(pending_payments)}\n\n"
             f"🔴 KillSwitch: {ks}"
         )
@@ -512,9 +515,10 @@ def cmd_list(msg):
         text = "🔑 Ключи:\n\n"
         for k in all_keys[-20:]:
             icon = "✅" if k["STATUS"].lower() == "active" else "🚫"
-            hwid_display = k["HWID"] if k["HWID"] else "не привязан"
+            hwid_display = k["HWID"][:20] if k["HWID"] else "не привязан"
+            hash_display = "✓" if k["INTEGRITY_HASH"] else "✗"
             text += f"{icon} <code>{k['KEY']}</code>\n"
-            text += f"   HWID: <code>{hwid_display}</code>\n"
+            text += f"   HWID: {hwid_display} | Hash: {hash_display}\n"
             text += f"   Срок: {k['EXPIRES']}\n\n"
         bot.send_message(msg.chat.id, text, parse_mode="HTML")
     except Exception as e:
@@ -538,23 +542,18 @@ def cmd_setprice(msg):
     save_settings(settings)
     bot.send_message(msg.chat.id, f"✅ {tariff} = {price}₽")
 
-# ============================================================
-# УПРАВЛЕНИЕ РЕКВИЗИТАМИ
-# ============================================================
-
 @bot.message_handler(commands=["setname"])
 def cmd_setname(msg):
     if not is_admin(msg.from_user.id):
         return
     new_name = msg.text.replace("/setname", "", 1).strip()
     if not new_name:
-        bot.send_message(msg.chat.id, "Формат: /setname Имя Фамилия")
         return
     if "payment" not in settings:
         settings["payment"] = DEFAULT_SETTINGS["payment"].copy()
     settings["payment"]["name"] = new_name
     save_settings(settings)
-    bot.send_message(msg.chat.id, f"✅ Получатель изменён:\n{new_name}")
+    bot.send_message(msg.chat.id, f"✅ Получатель: {new_name}")
 
 @bot.message_handler(commands=["setcard"])
 def cmd_setcard(msg):
@@ -562,13 +561,12 @@ def cmd_setcard(msg):
         return
     new_card = msg.text.replace("/setcard", "", 1).strip()
     if not new_card:
-        bot.send_message(msg.chat.id, "Формат: /setcard 1234 5678 9012 3456")
         return
     if "payment" not in settings:
         settings["payment"] = DEFAULT_SETTINGS["payment"].copy()
     settings["payment"]["card"] = new_card
     save_settings(settings)
-    bot.send_message(msg.chat.id, f"✅ Карта изменена:\n{new_card}")
+    bot.send_message(msg.chat.id, f"✅ Карта: {new_card}")
 
 @bot.message_handler(commands=["setbank"])
 def cmd_setbank(msg):
@@ -576,13 +574,12 @@ def cmd_setbank(msg):
         return
     new_bank = msg.text.replace("/setbank", "", 1).strip()
     if not new_bank:
-        bot.send_message(msg.chat.id, "Формат: /setbank Сбербанк")
         return
     if "payment" not in settings:
         settings["payment"] = DEFAULT_SETTINGS["payment"].copy()
     settings["payment"]["bank"] = new_bank
     save_settings(settings)
-    bot.send_message(msg.chat.id, f"✅ Банк изменён:\n{new_bank}")
+    bot.send_message(msg.chat.id, f"✅ Банк: {new_bank}")
 
 @bot.message_handler(commands=["showpay"])
 def cmd_showpay(msg):
@@ -590,43 +587,25 @@ def cmd_showpay(msg):
         return
     bot.send_message(msg.chat.id, f"Текущие реквизиты:\n\n{build_payment_info()}")
 
-# ============================================================
-# KILL SWITCH
-# ============================================================
-
 @bot.message_handler(commands=["killswitch"])
 def cmd_killswitch(msg):
     if not is_admin(msg.from_user.id):
         return
     parts = msg.text.split()
-
     if len(parts) == 1:
         status = settings.get("killswitch", False)
-        status_text = "🔴 ВКЛЮЧЕН (чит выключен у всех)" if status else "🟢 ВЫКЛЮЧЕН (чит работает)"
-        bot.send_message(
-            msg.chat.id,
-            f"KillSwitch статус: {status_text}\n\n"
-            f"Команды:\n"
-            f"/killswitch on — выключить чит у ВСЕХ\n"
-            f"/killswitch off — включить обратно"
-        )
+        status_text = "🔴 ВКЛЮЧЕН" if status else "🟢 ВЫКЛЮЧЕН"
+        bot.send_message(msg.chat.id, f"KillSwitch: {status_text}\n\n/killswitch on|off")
         return
-
     action = parts[1].lower()
     if action == "on":
         settings["killswitch"] = True
         save_settings(settings)
-        bot.send_message(msg.chat.id, "🔴 KILLSWITCH ВКЛЮЧЁН!\n\nЧит выключится у всех при следующем heartbeat (~5 мин).")
+        bot.send_message(msg.chat.id, "🔴 KILLSWITCH ВКЛ! Чит выключится у всех.")
     elif action == "off":
         settings["killswitch"] = False
         save_settings(settings)
-        bot.send_message(msg.chat.id, "🟢 KillSwitch выключен.\n\nЧит снова доступен для юзеров.")
-    else:
-        bot.send_message(msg.chat.id, "❌ Формат: /killswitch on|off")
-
-# ============================================================
-# ТЕСТОВЫЕ КОМАНДЫ
-# ============================================================
+        bot.send_message(msg.chat.id, "🟢 KillSwitch выключен.")
 
 @bot.message_handler(commands=["testlink"])
 def cmd_testlink(msg):
@@ -634,22 +613,9 @@ def cmd_testlink(msg):
         return
     link = create_one_time_invite()
     if link:
-        bot.send_message(
-            msg.chat.id,
-            f"✅ Тестовая ссылка создана:\n{link}\n\n"
-            f"⚠️ Одноразовая, для 1 человека, работает 24 часа",
-            disable_web_page_preview=True
-        )
+        bot.send_message(msg.chat.id, f"✅ Тестовая ссылка:\n{link}", disable_web_page_preview=True)
     else:
-        bot.send_message(
-            msg.chat.id,
-            "❌ Не удалось создать ссылку!\n\n"
-            "Проверь:\n"
-            "1. Бот добавлен в канал?\n"
-            "2. Бот назначен админом?\n"
-            "3. У бота есть право 'Приглашать пользователей'?\n"
-            "4. CHANNEL_ID правильный?"
-        )
+        bot.send_message(msg.chat.id, "❌ Не удалось создать")
 
 @bot.message_handler(commands=["adminhelp"])
 def cmd_adminhelp(msg):
@@ -658,29 +624,24 @@ def cmd_adminhelp(msg):
     text = (
         "👑 Админские команды:\n\n"
         "🔑 Ключи:\n"
-        "/genkey 7|30|forever — создать ключ\n"
-        "/ban КЛЮЧ — забанить\n"
-        "/unban КЛЮЧ — разбанить\n"
-        "/resethwid КЛЮЧ — сбросить HWID\n\n"
+        "/genkey 7|30|forever\n"
+        "/ban КЛЮЧ\n"
+        "/unban КЛЮЧ\n"
+        "/resethwid КЛЮЧ\n"
+        "/resethash КЛЮЧ — сброс проверки целостности\n\n"
         "💰 Заказы:\n"
-        "/approve USER_ID — подтвердить оплату (+ ссылка)\n"
-        "/reject USER_ID — отклонить\n\n"
+        "/approve USER_ID\n"
+        "/reject USER_ID\n\n"
         "💳 Реквизиты:\n"
-        "/setname Иван И. — сменить получателя\n"
-        "/setcard 1234 5678... — сменить карту\n"
-        "/setbank Сбербанк — сменить банк\n"
-        "/showpay — показать реквизиты\n\n"
+        "/setname /setcard /setbank /showpay\n\n"
         "⚙️ Цены:\n"
-        "/setprice 7 350 — изменить цену\n\n"
+        "/setprice 7 350\n\n"
         "🔴 БЕЗОПАСНОСТЬ:\n"
-        "/killswitch — статус\n"
-        "/killswitch on — ВЫКЛЮЧИТЬ чит у ВСЕХ\n"
-        "/killswitch off — включить обратно\n\n"
+        "/killswitch on|off\n\n"
         "📥 Канал:\n"
-        "/testlink — тестовая одноразовая ссылка\n\n"
+        "/testlink\n\n"
         "📊 Инфо:\n"
-        "/stats — статистика\n"
-        "/list — список ключей"
+        "/stats /list"
     )
     bot.send_message(msg.chat.id, text)
 
@@ -709,6 +670,7 @@ def api_activate():
         data = request.get_json()
         key = str(data.get("key", "")).strip().upper()
         hwid = str(data.get("hwid", "")).strip().upper()
+        ihash = str(data.get("hash", "")).strip().upper()
 
         if not key or not hwid:
             return jsonify({"status": "error", "message": "missing_data"}), 400
@@ -731,10 +693,20 @@ def api_activate():
             except:
                 pass
 
+        # Привязка HWID (если ещё не был)
         if not current_hwid:
             update_hwid(key, hwid)
             try:
                 bot.send_message(ADMIN_ID, f"🔑 АВТО-АКТИВАЦИЯ\nКлюч: <code>{key}</code>\nHWID: <code>{hwid}</code>", parse_mode="HTML")
+            except:
+                pass
+
+        # Сохранение integrity hash (если ещё не был)
+        current_hash = row["INTEGRITY_HASH"]
+        if ihash and not current_hash:
+            update_integrity_hash(key, ihash)
+            try:
+                bot.send_message(ADMIN_ID, f"🔐 INTEGRITY HASH сохранён\nКлюч: <code>{key}</code>\nHash: <code>{ihash[:16]}...</code>", parse_mode="HTML")
             except:
                 pass
 
@@ -754,6 +726,7 @@ def api_check():
         data = request.get_json()
         key = str(data.get("key", "")).strip().upper()
         hwid = str(data.get("hwid", "")).strip().upper()
+        ihash = str(data.get("hash", "")).strip().upper()
 
         row = find_key(key)
         if not row:
@@ -762,6 +735,16 @@ def api_check():
             return jsonify({"status": "error", "message": "key_banned"}), 403
         if row["HWID"] and row["HWID"] != hwid:
             return jsonify({"status": "error", "message": "hwid_mismatch"}), 403
+
+        # ПРОВЕРКА ЦЕЛОСТНОСТИ
+        stored_hash = row["INTEGRITY_HASH"]
+        if stored_hash and ihash and stored_hash != ihash:
+            # Хеш не совпадает — .exe был изменён!
+            try:
+                bot.send_message(ADMIN_ID, f"⚠️ INTEGRITY FAIL\nКлюч: <code>{key}</code>\nOжидался: <code>{stored_hash[:16]}...</code>\nПришёл: <code>{ihash[:16]}...</code>", parse_mode="HTML")
+            except:
+                pass
+            return jsonify({"status": "error", "message": "integrity_fail"}), 403
 
         if row["EXPIRES"].lower() != "forever":
             try:
@@ -784,7 +767,7 @@ def run_flask():
 
 if __name__ == "__main__":
     print("=" * 50)
-    print("TakemiX Shop Bot v1.3")
+    print("TakemiX Shop Bot v1.4")
     print("=" * 50)
     print(f"Bot Token: {BOT_TOKEN[:20]}...")
     print(f"Admin ID: {ADMIN_ID}")
@@ -809,8 +792,7 @@ if __name__ == "__main__":
     time.sleep(1)
     print(f"✅ API работает на порту {API_PORT}")
     print()
-    print("✅ Бот запущен! Пиши в Telegram.")
-    print("Ctrl+C для остановки")
+    print("✅ Бот запущен!")
     print("=" * 50)
 
     try:
